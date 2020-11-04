@@ -4,6 +4,7 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from functools import partial
 
 
 def autopad(k, p=None):  # kernel, padding
@@ -61,7 +62,6 @@ class _DenseLayer(nn.Sequential):
             new_features = F.dropout(new_features, p=self.drop_rate, training=self.training)
         return torch.cat([x, new_features], 1)
 
-
 class _DenseBlock(nn.Sequential):
     """DenseBlock"""
     def __init__(self, num_layers, c1,growth_rate, bn_size):
@@ -73,6 +73,83 @@ class _DenseBlock(nn.Sequential):
         self.add_module("relu_dense", nn.ReLU(inplace=True))
         self.add_module("conv_dense",nn.Conv2d(c1+num_layers*growth_rate, c1,kernel_size=1, stride=1))
 
+class Conv2dDynamicSamePadding(nn.Conv2d):
+    """2D Convolutions like TensorFlow, for a dynamic image size.
+       The padding is operated in forward function by calculating dynamically.
+    """
+
+    # Tips for 'SAME' mode padding.
+    #     Given the following:
+    #         i: width or height
+    #         s: stride
+    #         k: kernel size
+    #         d: dilation
+    #         p: padding
+    #     Output after Conv2d:
+    #         o = floor((i+p-((k-1)*d+1))/s+1)
+    # If o equals i, i = floor((i+p-((k-1)*d+1))/s+1),
+    # => p = (i-1)*s+((k-1)*d+1)-i
+
+    def __init__(self, in_channels, out_channels, kernel_size, stride=1, dilation=1, groups=1, bias=True):
+        super().__init__(in_channels, out_channels, kernel_size, stride, 0, dilation, groups, bias)
+        self.stride = self.stride if len(self.stride) == 2 else [self.stride[0]] * 2
+
+    def forward(self, x):
+        ih, iw = x.size()[-2:]
+        kh, kw = self.weight.size()[-2:]
+        sh, sw = self.stride
+        oh, ow = math.ceil(ih / sh), math.ceil(iw / sw) # change the output size according to stride ! ! !
+        pad_h = max((oh - 1) * self.stride[0] + (kh - 1) * self.dilation[0] + 1 - ih, 0)
+        pad_w = max((ow - 1) * self.stride[1] + (kw - 1) * self.dilation[1] + 1 - iw, 0)
+        if pad_h > 0 or pad_w > 0:
+            x = F.pad(x, [pad_w // 2, pad_w - pad_w // 2, pad_h // 2, pad_h - pad_h // 2])
+        return F.conv2d(x, self.weight, self.bias, self.stride, self.padding, self.dilation, self.groups)
+
+class Conv2dStaticSamePadding(nn.Conv2d):
+    """2D Convolutions like TensorFlow's 'SAME' mode, with the given input image size.
+       The padding mudule is calculated in construction function, then used in forward.
+    """
+
+    # With the same calculation as Conv2dDynamicSamePadding
+
+    def __init__(self, in_channels, out_channels, kernel_size, stride=1, image_size=None, **kwargs):
+        super().__init__(in_channels, out_channels, kernel_size, stride, **kwargs)
+
+        self.stride = self.stride if len(self.stride) == 2 else [self.stride[0]] * 2
+
+        # Calculate padding based on image size and save it
+        assert image_size is not None
+        ih, iw = (image_size, image_size) if isinstance(image_size, int) else image_size
+        kh, kw = self.weight.size()[-2:]
+        sh, sw = self.stride
+        oh, ow = math.ceil(ih / sh), math.ceil(iw / sw)
+        pad_h = max((oh - 1) * self.stride[0] + (kh - 1) * self.dilation[0] + 1 - ih, 0)
+        pad_w = max((ow - 1) * self.stride[1] + (kw - 1) * self.dilation[1] + 1 - iw, 0)
+        if pad_h > 0 or pad_w > 0:
+            self.static_padding = nn.ZeroPad2d((pad_w // 2, pad_w - pad_w // 2,
+                                                pad_h // 2, pad_h - pad_h // 2))
+        else:
+            self.static_padding = nn.Identity()
+
+    def forward(self, x):
+        x = self.static_padding(x)
+        x = F.conv2d(x, self.weight, self.bias, self.stride, self.padding, self.dilation, self.groups)
+        return x
+
+def get_same_padding_conv2d(image_size=None):
+    """Chooses static padding if you have specified an image size, and dynamic padding otherwise.
+       Static padding is necessary for ONNX exporting of models.
+
+    Args:
+        image_size (int or tuple): Size of the image.
+
+    Returns:
+        Conv2dDynamicSamePadding or Conv2dStaticSamePadding.
+    """
+    if image_size is None:
+        return Conv2dDynamicSamePadding
+    else:
+        return partial(Conv2dStaticSamePadding, image_size=image_size)
 
 class Bottleneck(nn.Module):
     # Standard bottleneck
@@ -92,6 +169,7 @@ class BottleneckCSP(nn.Module):
     def __init__(self, c1, c2, n=1, shortcut=True, g=1, e=0.5):  # ch_in, ch_out, number, shortcut, groups, expansion
         super(BottleneckCSP, self).__init__()
         c_ = int(c2 * e)  # hidden channels
+        self.has_se = True
         self.cv1 = Conv(c1, c_, 1, 1)
         self.cv2 = nn.Conv2d(c1, c_, 1, 1, bias=False)
         self.cv3 = nn.Conv2d(c_, c_, 1, 1, bias=False)
@@ -99,8 +177,11 @@ class BottleneckCSP(nn.Module):
         self.bn = nn.BatchNorm2d(2 * c_)  # applied to cat(cv2, cv3)
         self.act = nn.LeakyReLU(0.1, inplace=True)
 
-        self._se_reduce = Conv2d(in_channels=oup, out_channels=num_squeezed_channels, kernel_size=1)
-        self._se_expand = Conv2d(in_channels=num_squeezed_channels, out_channels=oup, kernel_size=1)
+        if self.has_se:
+            Conv2d = get_same_padding_conv2d(image_size=(1, 1))
+            num_squeezed_channels = max(1, int(c_ * 2 * 0.7))
+            self._se_reduce = Conv2d(in_channels=c_ * 2, out_channels=num_squeezed_channels, kernel_size=1)
+            self._se_expand = Conv2d(in_channels=num_squeezed_channels, out_channels=c_ * 2, kernel_size=1)
 
         if shortcut:
             self.m = nn.Sequential(*[Bottleneck(c_, c_, shortcut, g, e=1.0) for _ in range(n)])
@@ -112,15 +193,18 @@ class BottleneckCSP(nn.Module):
     def forward(self, x):
         y1 = self.cv3(self.m(self.cv1(x)))
         y2 = self.cv2(x)
-        out = self.cv4(self.act(self.bn(torch.cat((y1, y2), dim=1))))
-
+        x_concat = torch.cat((y1, y2), dim=1)
         # Squeeze and Excitation
         if self.has_se:
-            x_squeezed = F.adaptive_avg_pool2d(x, 1)
+            x_squeezed = F.adaptive_avg_pool2d(x_concat, 1)
             x_squeezed = self._se_reduce(x_squeezed)
             x_squeezed = self._swish(x_squeezed)
             x_squeezed = self._se_expand(x_squeezed)
-            x = torch.sigmoid(x_squeezed) * x
+            x_concat = torch.sigmoid(x_squeezed) * x_concat
+
+        out = self.cv4(self.act(self.bn(x_concat)))
+
+
         return out
 
 
