@@ -151,6 +151,24 @@ def get_same_padding_conv2d(image_size=None):
     else:
         return partial(Conv2dStaticSamePadding, image_size=image_size)
 
+# A memory-efficient implementation of Swish function
+class SwishImplementation(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, i):
+        result = i * torch.sigmoid(i)
+        ctx.save_for_backward(i)
+        return result
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        i = ctx.saved_tensors[0]
+        sigmoid_i = torch.sigmoid(i)
+        return grad_output * (sigmoid_i * (1 + i * (1 - sigmoid_i)))
+
+class MemoryEfficientSwish(nn.Module):
+    def forward(self, x):
+        return SwishImplementation.apply(x)
+
 class Bottleneck(nn.Module):
     # Standard bottleneck
     def __init__(self, c1, c2, shortcut=True, g=1, e=0.5):  # ch_in, ch_out, shortcut, groups, expansion
@@ -169,7 +187,7 @@ class BottleneckCSP(nn.Module):
     def __init__(self, c1, c2, n=1, shortcut=True, g=1, e=0.5):  # ch_in, ch_out, number, shortcut, groups, expansion
         super(BottleneckCSP, self).__init__()
         c_ = int(c2 * e)  # hidden channels
-        self.has_se = True
+        self.has_se = shortcut
         self.cv1 = Conv(c1, c_, 1, 1)
         self.cv2 = nn.Conv2d(c1, c_, 1, 1, bias=False)
         self.cv3 = nn.Conv2d(c_, c_, 1, 1, bias=False)
@@ -182,6 +200,7 @@ class BottleneckCSP(nn.Module):
             num_squeezed_channels = max(1, int(c_ * 2 * 0.7))
             self._se_reduce = Conv2d(in_channels=c_ * 2, out_channels=num_squeezed_channels, kernel_size=1)
             self._se_expand = Conv2d(in_channels=num_squeezed_channels, out_channels=c_ * 2, kernel_size=1)
+            self._swish = MemoryEfficientSwish()
 
         if shortcut:
             self.m = nn.Sequential(*[Bottleneck(c_, c_, shortcut, g, e=1.0) for _ in range(n)])

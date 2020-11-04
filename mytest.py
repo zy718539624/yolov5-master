@@ -176,7 +176,7 @@ def test_activaton():
 
 if __name__ == '__main__':
     # watch_gpu()
-    get_map(63)
+    get_map(64)
     # test_asff()
     # eva_convout()
     # rename()
