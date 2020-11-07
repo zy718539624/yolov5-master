@@ -7,7 +7,7 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 
-from models.common import Conv, Bottleneck, SPP, DWConv, Focus, BottleneckCSP, Concat, ASFF
+from models.common import Conv, Bottleneck, SPP, DWConv, Focus, BottleneckCSP, Concat, ASFF,BiFPN,BiFPNFull
 from models.experimental import MixConv2d, CrossConv, C3
 from utils.general import check_anchor_order, make_divisible, check_file, set_logging
 from utils.torch_utils import (
@@ -37,6 +37,9 @@ class Detect(nn.Module):
 
     def forward(self, x):
         # x = x.copy()  # for profiling
+        if len(x) == 1:
+            x = x[0]
+            x = [h for h in x]
         z = []  # inference output
         self.training |= self.export
         for i in range(self.nl):
@@ -230,10 +233,16 @@ def parse_model(d, ch):  # model_dict, input_channels(3)
                 c2 = 384
             elif args[0] == 2:
                 c2 = 192
+        elif m is BiFPNFull:
+            zzz = 1
         elif m is Detect:
-            args.append([ch[x + 1] for x in f])   # 在args中添加来自三个输出层的输出特征图channel数
+            args.append([192, 384, 768])   # 在args中添加来自三个输出层的输出特征图channel数
             if isinstance(args[1], int):  # number of anchors
                 args[1] = [list(range(args[1] * 2))] * len(f)
+        # elif m is Detect:
+        #     args.append([ch[x + 1] for x in f])   # 在args中添加来自三个输出层的输出特征图channel数
+        #     if isinstance(args[1], int):  # number of anchors
+        #         args[1] = [list(range(args[1] * 2))] * len(f)
         else:
             c2 = ch[f]
 

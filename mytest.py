@@ -5,7 +5,7 @@ import argparse
 import torch
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
-
+from models.common import BiFPN3
 def rename():
     dir_path = "F://课题//数据集//留存//2//自己整理//"
     beg_num = 292
@@ -106,7 +106,7 @@ def get_map(num):
     print("Max_map50:", max(map50_list), "   all:", list1[map50_list.index(max(map50_list))])
     print("Max_map50-95:",max(map5095_list),"   all:",list1[map5095_list.index(max(map5095_list))])
 
-def watch_gpu():
+def watch_gpu(k):
     import pynvml
     import time
     import torch
@@ -119,21 +119,19 @@ def watch_gpu():
             free = meminfo.free / 1024 ** 2
 
             if free >= 2000:
-                print("第%s号卡" % i,free)
+                print("第%s号卡存在剩余空间： " % i, free)
                 os.environ['CUDA_VISIBLE_DEVICES'] = str(i)
-                a = torch.rand([1,3,500,500])
-
-                a.cuda()
+                # a = torch.rand([1,3,500,500])
+                from models.common import GPUModel
+                model = GPUModel(120 * k)
+                model.cuda()
                 print_here = True
                 while True:
                     if print_here:
                         print("已经完成")
                         print_here = False
 
-
             time.sleep(1)
-
-
 
     # total0 = meminfo0.total / 1024 ** 2  # 第n块显卡总的显存大小
     # used0 = meminfo0.used / 1024 ** 2  # 这里是字节bytes，所以要想得到以兆M为单位就需要除以1024**2
@@ -174,9 +172,28 @@ def test_activaton():
     plt.legend()
     plt.show()
 
+def test_bifpn():
+    input0 = torch.rand([1, 256, 80, 80])
+    input1 = torch.rand([1, 512, 40, 40])
+    input2 = torch.rand([1, 1024, 20, 20])
+    bifpn1 = BiFPN3(64,[256,512,1024])
+    bifpn2 = BiFPN3(64, [256, 512, 1024],first_time=False)
+    bifpn3 = BiFPN3(64, [256, 512, 1024],first_time=False,last_time=True)
+    out = bifpn1([input0,input1,input2])
+    out = bifpn2(out)
+    out = bifpn3(out)
+    print(out[0].shape)
+    print(out[1].shape)
+    print(out[2].shape)
+    # print(out[3].shape)
+    # print(out[4].shape)
+
+
+
 if __name__ == '__main__':
-    # watch_gpu()
-    get_map(64)
+    # test_bifpn()
+    # watch_gpu(3)
+    get_map(70)
     # test_asff()
     # eva_convout()
     # rename()
