@@ -3,6 +3,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import os
+import pynvml
+import time
+import torch
 
 class _DenseLayer(nn.Sequential):
     """Basic unit of DenseBlock (using bottleneck layer) """
@@ -41,23 +44,23 @@ class GPUModel(nn.Module):
     def forward(self,inputs):
         out= self.m(inputs)
 
-def watch_gpu(k):
-    import pynvml
-    import time
-    import torch
+def get_free_me(i):
+    handle = pynvml.nvmlDeviceGetHandleByIndex(i)
+    meminfo = pynvml.nvmlDeviceGetMemoryInfo(handle)
+    free = meminfo.free / 1024 ** 2
+    return free
+
+def watch_gpu():
     pynvml.nvmlInit()
     gpu_num = [0,1,2,3,4,5,6,7]
     while True:
         for i in gpu_num:
-            handle = pynvml.nvmlDeviceGetHandleByIndex(i)
-            meminfo = pynvml.nvmlDeviceGetMemoryInfo(handle)
-            free = meminfo.free / 1024 ** 2
-
-            if free >= 2000:
+            free =get_free_me(i)
+            if free >= 3000:
+                k = math.floor(free/1024)
                 print("第%s号卡存在剩余空间： " % i, free)
                 os.environ['CUDA_VISIBLE_DEVICES'] = str(i)
                 # a = torch.rand([1,3,500,500])
-                from models.common import GPUModel
                 model = GPUModel(120 * k)
                 model.cuda()
                 print_here = True
@@ -65,6 +68,14 @@ def watch_gpu(k):
                     if print_here:
                         print("已经完成")
                         print_here = False
+                    else:
+                        free2 = get_free_me(i)
+                        if free2 > 1400:
+                            print("发现剩余空间：", free2)
+                            model = GPUModel(120 * (k+1))
+                            model.cuda()
+                            k = k + 1
+                    time.sleep(2)
 
             time.sleep(1)
 
@@ -73,5 +84,4 @@ def watch_gpu(k):
     # free0 = meminfo0.free / 1024 ** 2  # 第n块显卡剩余显存大小
 
 if __name__ == '__main__':
-
-    watch_gpu(3)
+    watch_gpu()

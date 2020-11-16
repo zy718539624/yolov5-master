@@ -669,7 +669,7 @@ class BiFPN3(nn.Module):
     modified by Zylo117
     """
 
-    def __init__(self, num_channels, conv_channels, first_time=True,last_time=False, epsilon=1e-4, onnx_export=False, attention=True,
+    def __init__(self, conv_channels, first_time=True, epsilon=1e-4, onnx_export=False, attention=True,
                  use_p8=False):
         """
 
@@ -693,9 +693,6 @@ class BiFPN3(nn.Module):
         self.conv4_down = SeparableConvBlock(conv_channels[1], onnx_export=onnx_export)
         self.conv5_down = SeparableConvBlock(conv_channels[2], onnx_export=onnx_export)
 
-        if use_p8:
-            self.conv7_up = SeparableConvBlock(num_channels, onnx_export=onnx_export)
-            self.conv8_down = SeparableConvBlock(num_channels, onnx_export=onnx_export)
 
         # Feature scaling layers
         self.p6_upsample = nn.Upsample(scale_factor=2, mode='nearest')
@@ -714,7 +711,6 @@ class BiFPN3(nn.Module):
         self.swish = MemoryEfficientSwish() if not onnx_export else Swish()
 
         self.first_time = first_time
-        self.last_time = last_time
         if self.first_time:
             self.p5_down_channel = nn.Sequential(
                 Conv2dStaticSamePadding(conv_channels[2], conv_channels[2], 1),
@@ -815,7 +811,6 @@ class BiFPN3(nn.Module):
     def _forward_fast_attention(self, inputs):
         if self.first_time:
             p3, p4, p5 = inputs
-
 
             p3_in = self.p3_down_channel(p3)
             p4_in = self.p4_down_channel(p4)
@@ -950,15 +945,19 @@ class BiFPN3(nn.Module):
 class BiFPNFull(nn.Module):
     def __init__(self,num_channels, conv_channels):
         super(BiFPNFull,self).__init__()
-        self.bifpn1 = BiFPN3(64, [192, 384, 768])
-        self.bifpn2 = BiFPN3(64, [192, 384, 768], first_time=False)
-        self.bifpn3 = BiFPN3(64, [192, 384, 768], first_time=False, last_time=True)
+        self.bifpn1 = BiFPN3([192, 384, 768])
+        # self.bifpn2 = BiFPN3(64, [192, 384, 768], first_time=False)
+        # self.bifpn3 = BiFPN3(64, [192, 384, 768], first_time=False)
+        # self.bifpn4 = BiFPN3(64, [192, 384, 768], first_time=False)
+        # self.bifpn5 = BiFPN3([192, 384, 768], first_time=False)
 
     def forward(self,input):
         y1 = self.bifpn1(input)
-        y2 = self.bifpn2(y1)
-        out = self.bifpn3(y2)
-        return out
+        # y2 = self.bifpn2(y1)
+        # y3 = self.bifpn3(y2)
+        # y4 = self.bifpn4(y3)
+        # out = self.bifpn5(y1)
+        return y1
 
 class Bottleneck(nn.Module):
     # Standard bottleneck
@@ -993,7 +992,7 @@ class BottleneckCSP(nn.Module):
         self.act = nn.LeakyReLU(0.1, inplace=True)
 
         "加权"
-        self.has_se = shortcut
+        self.has_se = False
         if self.has_se:
             Conv2d = get_same_padding_conv2d(image_size=(1, 1))
             num_squeezed_channels = max(1, int(c2 * 0.6))
@@ -1002,8 +1001,8 @@ class BottleneckCSP(nn.Module):
             self._swish = MemoryEfficientSwish()
 
         if shortcut:
-            # self.m = nn.Sequential(*[Bottleneck(c_, c_, shortcut, g, e=1.0) for _ in range(n)])
-            self.m = nn.Sequential(_DenseBlock(n+1, c_, 32, 4))
+            self.m = nn.Sequential(*[Bottleneck(c_, c_, shortcut, g, e=1.0) for _ in range(n)])
+            # self.m = nn.Sequential(_DenseBlock(n+1, c_, 32, 4))
             # self.m = nn.Sequential(*[_DenseBlock(4,c_,32,4) for _ in range(math.ceil(n/2))])
         else:
             self.m = nn.Sequential(*[Bottleneck(c_, c_, shortcut, g, e=1.0) for _ in range(n)])

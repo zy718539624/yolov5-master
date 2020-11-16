@@ -669,6 +669,7 @@ def load_mosaic(self, index):
             x1b, y1b, x2b, y2b = 0, 0, min(w, x2a - x1a), min(y2a - y1a, h)
 
         img4[y1a:y2a, x1a:x2a] = img[y1b:y2b, x1b:x2b]  # img4[ymin:ymax, xmin:xmax]
+
         padw = x1a - x1b
         padh = y1a - y1b
 
@@ -682,11 +683,19 @@ def load_mosaic(self, index):
             labels[:, 4] = h * (x[:, 2] + x[:, 4] / 2) + padh
         labels4.append(labels)
 
+
+
     # Concat/clip labels
     if len(labels4):
         labels4 = np.concatenate(labels4, 0)
         np.clip(labels4[:, 1:], 0, 2 * s, out=labels4[:, 1:])  # use with random_perspective
         # img4, labels4 = replicate(img4, labels4)  # replicate
+
+    "未增强前的图片"
+    # from matplotlib import pyplot as plt
+    # img_1 = img4[:, :, [2, 1, 0]]
+    # plt.imshow(img_1)
+    # plt.show()
 
     # Augment
     img4, labels4 = random_perspective(img4, labels4,
@@ -696,6 +705,12 @@ def load_mosaic(self, index):
                                        shear=self.hyp['shear'],
                                        perspective=self.hyp['perspective'],
                                        border=self.mosaic_border)  # border to remove
+
+    "增强后的图片"
+    # img_4 = img4[:, :, [2, 1, 0]]
+    # plt.imshow(img_4)
+    # plt.show()
+
 
     return img4, labels4
 
@@ -753,7 +768,6 @@ def letterbox(img, new_shape=(640, 640), color=(114, 114, 114), auto=True, scale
 def random_perspective(img, targets=(), degrees=10, translate=.1, scale=.1, shear=10, perspective=0.0, border=(0, 0)):
     # torchvision.transforms.RandomAffine(degrees=(-10, 10), translate=(.1, .1), scale=(.9, 1.1), shear=(-10, 10))
     # targets = [cls, xyxy]
-
     height = img.shape[0] + border[0] * 2  # shape(h,w,c)
     width = img.shape[1] + border[1] * 2
 
@@ -767,7 +781,7 @@ def random_perspective(img, targets=(), degrees=10, translate=.1, scale=.1, shea
     P[2, 0] = random.uniform(-perspective, perspective)  # x perspective (about y)
     P[2, 1] = random.uniform(-perspective, perspective)  # y perspective (about x)
 
-    # Rotation and Scale
+    # Rotation and Scale   旋转和缩放
     R = np.eye(3)
     a = random.uniform(-degrees, degrees)
     # a += random.choice([-180, -90, 0, 90])  # add 90deg rotations to small rotations
@@ -775,12 +789,12 @@ def random_perspective(img, targets=(), degrees=10, translate=.1, scale=.1, shea
     # s = 2 ** random.uniform(-scale, scale)
     R[:2] = cv2.getRotationMatrix2D(angle=a, center=(0, 0), scale=s)
 
-    # Shear
-    S = np.eye(3)
+    # Shear 裁剪
+    S = np.eye(3)  # 生成对角矩阵
     S[0, 1] = math.tan(random.uniform(-shear, shear) * math.pi / 180)  # x shear (deg)
     S[1, 0] = math.tan(random.uniform(-shear, shear) * math.pi / 180)  # y shear (deg)
 
-    # Translation
+    # Translation  平移
     T = np.eye(3)
     T[0, 2] = random.uniform(0.5 - translate, 0.5 + translate) * width  # x translation (pixels)
     T[1, 2] = random.uniform(0.5 - translate, 0.5 + translate) * height  # y translation (pixels)

@@ -1,5 +1,6 @@
 import random
 import os
+import numpy as np
 import shutil
 import argparse
 import torch
@@ -188,12 +189,56 @@ def test_bifpn():
     # print(out[3].shape)
     # print(out[4].shape)
 
+def test_augmentation():
+    import cv2
+    img = cv2.imread("boll/images/val2017/1.jpg")
+    r = np.random.uniform(-1, 1, 3) * [0.4, 0.4, 0.2] + 1  # random gains
+    # r = np.array([1, 1, 1])
+    hue, sat, val = cv2.split(cv2.cvtColor(img, cv2.COLOR_BGR2HSV))
+    dtype = img.dtype  # uint8
 
+    x = np.arange(0, 256, dtype=np.int16)
+    lut_hue = ((x * r[0]) % 180).astype(dtype)
+    lut_sat = np.clip(x * r[1], 0, 255).astype(dtype)
+    lut_val = np.clip(x * r[2], 0, 255).astype(dtype)
+
+    img_hsv = cv2.merge((cv2.LUT(hue, lut_hue), cv2.LUT(sat, lut_sat), cv2.LUT(val, lut_val))).astype(dtype)
+    reimg = cv2.cvtColor(img_hsv, cv2.COLOR_HSV2BGR)  # no return needed
+    reimg = reimg[:, :, [2, 1, 0]]
+    plt.imshow(reimg)
+    plt.show()
+
+def hungarian_al():
+    from munkres import Munkres, print_matrix
+    matrix = [[5, 9, 1],
+              [10, 3, 2],
+              [8, 7, 4],
+              [1, 2, 3]]
+    matrix = np.random.random((278,20))
+
+    matrix = matrix.tolist()
+    print(matrix)
+    # matrix = [[5,10,8,1],
+    #           [9,3,7,2],
+    #           [1,2,4,3]]
+    m = Munkres()
+    indexes = m.compute(matrix)
+    print_matrix(matrix, msg='Lowest cost through this matrix:')
+    total = 0
+    for row, column in indexes:
+        value = matrix[row][column]
+        total += value
+        print(f'({row}, {column}) -> {value}')
+    print(f'total cost: {total}')
 
 if __name__ == '__main__':
     # test_bifpn()
     # watch_gpu(3)
-    get_map(70)
+    #get_map(78)
     # test_asff()
     # eva_convout()
     # rename()
+    #hungarian_al()
+    t1 = torch.rand([1,3,80,80,6])
+    t2 = t1[...,4]
+    print(t2)

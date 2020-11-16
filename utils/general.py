@@ -469,19 +469,25 @@ class BCEBlurWithLogitsLoss(nn.Module):
 
 
 def compute_loss(p, targets, model):  # predictions, targets, model
+    # 获取设备
     device = targets.device
+    # 初始化各个部分损失
     lcls, lbox, lobj = torch.zeros(1, device=device), torch.zeros(1, device=device), torch.zeros(1, device=device)
+    # 获得标签分类，边框，索引，anchor
     tcls, tbox, indices, anchors = build_targets(p, targets, model)  # targets
+    # 获取超参数
     h = model.hyp  # hyperparameters
 
-    # Define criteria
+    # Define criteria  定义损失函数
     BCEcls = nn.BCEWithLogitsLoss(pos_weight=torch.Tensor([h['cls_pw']])).to(device)
     BCEobj = nn.BCEWithLogitsLoss(pos_weight=torch.Tensor([h['obj_pw']])).to(device)
 
     # Class label smoothing https://arxiv.org/pdf/1902.04103.pdf eqn 3
+    # 标签平滑，eps默认为0，其实是没用上。
     cp, cn = smooth_BCE(eps=0.0)
 
     # Focal loss
+    # 如果设置了fl_gamma参数，就使用focal loss，默认也是没使用的
     g = h['fl_gamma']  # focal loss gamma
     if g > 0:
         BCEcls, BCEobj = FocalLoss(BCEcls, g), FocalLoss(BCEobj, g)
@@ -489,27 +495,35 @@ def compute_loss(p, targets, model):  # predictions, targets, model
     # Losses
     nt = 0  # number of targets
     np = len(p)  # number of outputs
+    # 设置三个特征图对应输出的损失系数
     balance = [4.0, 1.0, 0.4] if np == 3 else [4.0, 1.0, 0.4, 0.1]  # P3-5 or P3-6
     for i, pi in enumerate(p):  # layer index, layer predictions
+        # 根据indices获取索引，方便找到对应网格的输出
         b, a, gj, gi = indices[i]  # image, anchor, gridy, gridx
+
         tobj = torch.zeros_like(pi[..., 0], device=device)  # target obj
 
         n = b.shape[0]  # number of targets
         if n:
             nt += n  # cumulative targets
-            ps = pi[b, a, gj, gi]  # prediction subset corresponding to targets
+            # 找到对应网格的输出
+            ps = pi[b, a, gj, gi]  #根据四个坐标值找到相应的数据  prediction subset corresponding to targets
 
             # Regression
+            # 对输出xywh做反算
             pxy = ps[:, :2].sigmoid() * 2. - 0.5
             pwh = (ps[:, 2:4].sigmoid() * 2) ** 2 * anchors[i]
             pbox = torch.cat((pxy, pwh), 1).to(device)  # predicted box
+            # 计算边框损失，注意这个CIoU=True，计算的是ciou损失
             giou = bbox_iou(pbox.T, tbox[i], x1y1x2y2=False, CIoU=True)  # giou(prediction, target)
             lbox += (1.0 - giou).mean()  # giou loss
 
             # Objectness
+            # 根据model.gr设置objectness的标签值
             tobj[b, a, gj, gi] = (1.0 - model.gr) + model.gr * giou.detach().clamp(0).type(tobj.dtype)  # giou ratio
 
             # Classification
+            # 设置如果类别数大于1才计算分类损失
             if model.nc > 1:  # cls loss (only if multiple classes)
                 t = torch.full_like(ps[:, 5:], cn, device=device)  # targets
                 t[range(n), tcls[i]] = cp
@@ -519,9 +533,12 @@ def compute_loss(p, targets, model):  # predictions, targets, model
             # with open('targets.txt', 'a') as file:
             #     [file.write('%11.5g ' * 4 % tuple(x) + '\n') for x in torch.cat((txy[i], twh[i]), 1)]
 
-        lobj += BCEobj(pi[..., 4], tobj) * balance[i]  # obj loss
+        # 计算objectness的损失
+        aaa = pi[..., 4]
+        lobj += BCEobj(aaa, tobj) * balance[i]  # obj loss
 
     s = 3 / np  # output count scaling
+    # 根据超参数设置的各个部分损失的系数 获取最终损失
     lbox *= h['giou'] * s
     lobj *= h['obj'] * s * (1.4 if np == 4 else 1.)
     lcls *= h['cls'] * s
@@ -532,54 +549,115 @@ def compute_loss(p, targets, model):  # predictions, targets, model
 
 
 def build_targets(p, targets, model):
+    """
+    Args:
+        p: 网络输出，List[torch.tensor * 3], p[i].shape = (b, 3, h, w, nc+5), hw分别为特征图的长宽,b为batch-size
+        targets: targets.shape = (nt, 6) , 6=icxywh,i表示第一张图片，c为类别，然后为坐标xywh
+        model: 模型
+    Returns:
+    """
+
     # Build targets for compute_loss(), input targets(image,class,x,y,w,h)
+    # 获取每一个检测层,共三个检测层
     det = model.module.model[-1] if is_parallel(model) else model.model[-1]  # Detect() module
-    na, nt = det.na, targets.shape[0]  # number of anchors, targets
+    # anchor数量和标签框数量
+    na, nt = det.na, targets.shape[0]  # number of anchors, targets, na=3, nt为ground—truth中目标的数量
     tcls, tbox, indices, anch = [], [], [], []
     gain = torch.ones(7, device=targets.device)  # normalized to gridspace gain
     ai = torch.arange(na, device=targets.device).float().view(na, 1).repeat(1, nt)  # same as .repeat_interleave(nt)
-    targets = torch.cat((targets.repeat(na, 1, 1), ai[:, :, None]), 2)  # append anchor indices
+    re_targets= targets.repeat(na, 1, 1) # 即将targets重复了三份，shape为[3，原来的shape]
+    aii = ai[:, :, None]
+    targets = torch.cat((re_targets, aii), 2)  #append anchor indices
+    """ targets中分三个，除了最后一列外，完全相同，而最后一列在三个分身中分别为0，1，2 """
 
+    # 设置偏移量
     g = 0.5  # bias
-    off = torch.tensor([[0, 0],
-                        [1, 0], [0, 1], [-1, 0], [0, -1],  # j,k,l,m
+    off = torch.tensor([[0, 0],[1, 0], [0, 1], [-1, 0], [0, -1],  # j,k,l,m
                         # [1, 1], [1, -1], [-1, 1], [-1, -1],  # jk,jm,lk,lm
                         ], device=targets.device).float() * g  # offsets
 
-    for i in range(det.nl):
-        anchors = det.anchors[i]
+    # 对每个检测层进行处理
+    for i in range(det.nl): # nl=3
+        anchors = det.anchors[i] # 三个anchor框
+
+        # 得到特征图的坐标系数
+        """
+        p[i].shape = (b, 3, h, w，nc+5), hw分别为网络预测的特征图的长宽，为 80*80，40*40，20*20
+        处理之后的 gain = [1, 1, w, h, w, h, 1]
+        """
         gain[2:6] = torch.tensor(p[i].shape)[[3, 2, 3, 2]]  # xyxy gain
 
         # Match targets to anchors
+        # 将标签框的xywh从基于0~1映射到基于特征图，即将xywh坐标转换为图像中的坐标值
         t = targets * gain
         if nt:
             # Matches
+            """
+                预测的wh与anchor的wh做匹配，筛选掉比值大于hyp['anchor_t']的(这应该是yolov5的创新点)，
+                从而更好的回归(与新的边框回归方式有关)
+                所以作者采用新的wh回归方式:
+                (wh.sigmoid() * 2) ** 2 * anchors[i], 原来yolov3为anchors[i] * exp(wh)
+                将标签框与anchor的倍数控制在0~4之间；
+                hyp.scratch.yaml中的超参数anchor_t = 4，所以也是通过此参数来判定anchors与标签框契合度；
+            """
+            # 计算比值ratio
             r = t[:, :, 4:6] / anchors[:, None]  # wh ratio
+            """
+                筛选满足1 / hyp['anchor_t'] < targets_wh/anchor_wh < hyp['anchor_t']的框;
+                由于wh回归公式中将标签框与anchor的倍数控制在0~4之间，所以这样筛选之后也会浪费一些输出空间；
+            """
+            "targets中有三份一样的数据，而正好每一层有三个anchor框，所以对于每一份数据，应该对应一个大小的框" \
+            "然后本步的作用就在于，将某一个anchors检测下，将与其相差过大的targets去掉"
             j = torch.max(r, 1. / r).max(2)[0] < model.hyp['anchor_t']  # compare
             # j = wh_iou(anchors, t[:, 4:6]) > model.hyp['iou_t']  # iou(3,n)=wh_iou(anchors(3,2), gwh(n,2))
+
+            # 筛选过后的t.shape = (M, 7),M为筛选过后的数量
             t = t[j]  # filter
 
             # Offsets
+            # 得到中心点坐标xy(相对于左上角的), (M, 2)
             gxy = t[:, 2:4]  # grid xy
+            # 得到中心点相对于右下角的坐标, (M, 2)
             gxi = gain[[2, 3]] - gxy  # inverse
+            """
+                把相对于各个网格左上角x<0.5,y<0.5和相对于右下角的x<0.5,y<0.5的框提取出来；
+                也就是j,k,l,m，在选取gij(也就是标签框分配给的网格的时候)对这四个部分的框都做一个偏移(减去上面的off),也就是下面的gij = (gxy - offsets).long()操作；
+                再将这四个部分的框与原始的gxy拼接在一起，总共就是五个部分；
+                也就是说：①将每个网格按照2x2分成四个部分，每个部分的框不仅采用当前网格的anchor进行回归，也采用该部分相邻的两个网格的anchor进行回归；
+                原yolov3就仅仅采用当前网格的anchor进行回归；
+                估计是用来缓解网格效应，但由于v5没发论文，所以也只是推测，yolov4也有相关解决网格效应的措施，是通过对sigmoid输出乘以一个大于1的系数；
+                这也与yolov5新的边框回归公式相关；
+                由于①，所以中心点回归也从yolov3的0~1的范围变成-0.5~1.5的范围；
+                所以中心点回归的公式变为：
+                xy.sigmoid() * 2. - 0.5 + cx
+            """
             j, k = ((gxy % 1. < g) & (gxy > 1.)).T
             l, m = ((gxi % 1. < g) & (gxi > 1.)).T
             j = torch.stack((torch.ones_like(j), j, k, l, m))
+            # 得到筛选的框(N, 7), N为筛选后的个数
             t = t.repeat((5, 1, 1))[j]
+            # 添加偏移量
+            "None 好像就是加一个括号包裹，在shape中多出个1"
             offsets = (torch.zeros_like(gxy)[None] + off[:, None])[j]
         else:
             t = targets[0]
             offsets = 0
 
         # Define
+        # b为batch中哪一张图片的索引，c为类别
         b, c = t[:, :2].long().T  # image, class
+        # 中心点回归标签
         gxy = t[:, 2:4]  # grid xy
+        # 长宽回归标签
         gwh = t[:, 4:6]  # grid wh
+        # 对应于原yolov3中，gij = gxy.long()
         gij = (gxy - offsets).long()
         gi, gj = gij.T  # grid xy indices
 
         # Append
+        # a为anchor的索引
         a = t[:, 6].long()  # anchor indices
+        # 添加索引，方便计算损失的时候取出对应位置的输出
         indices.append((b, a, gj, gi))  # image, anchor, grid indices
         tbox.append(torch.cat((gxy - gij, gwh), 1))  # box
         anch.append(anchors[a])  # anchors
@@ -594,6 +672,7 @@ def non_max_suppression(prediction, conf_thres=0.1, iou_thres=0.6, merge=False, 
     Returns:
          detections with shape: nx6 (x1, y1, x2, y2, conf, cls)
     """
+    "prediction shape为 (batchsize， 个数22717，6个预测值)"
 
     nc = prediction[0].shape[1] - 5  # number of classes
     xc = prediction[..., 4] > conf_thres  # candidates
@@ -610,7 +689,8 @@ def non_max_suppression(prediction, conf_thres=0.1, iou_thres=0.6, merge=False, 
     for xi, x in enumerate(prediction):  # image index, image inference
         # Apply constraints
         # x[((x[..., 2:4] < min_wh) | (x[..., 2:4] > max_wh)).any(1), 4] = 0  # width-height
-        x = x[xc[xi]]  # confidence
+        a = xc[xi]
+        x = x[a]  # confidence
 
         # If none remain process next image
         if not x.shape[0]:
@@ -620,7 +700,7 @@ def non_max_suppression(prediction, conf_thres=0.1, iou_thres=0.6, merge=False, 
         x[:, 5:] *= x[:, 4:5]  # conf = obj_conf * cls_conf
 
         # Box (center x, center y, width, height) to (x1, y1, x2, y2)
-        box = xywh2xyxy(x[:, :4])
+        box = xywh2xyxy(x[:, :4])  #将xywh坐标格式转为 上左点与下右点坐标的格式
 
         # Detections matrix nx6 (xyxy, conf, cls)
         if multi_label:
